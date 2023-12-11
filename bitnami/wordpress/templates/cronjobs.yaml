@@ -1,0 +1,250 @@
+{{- /*
+Copyright VMware, Inc.
+SPDX-License-Identifier: APACHE-2.0
+*/}}
+
+{{- if .Values.cronJobs.scheduler.enabled }}
+apiVersion: {{ include "common.capabilities.cronjob.apiVersion" . }}
+kind: CronJob
+metadata:
+  name: {{ include "common.names.fullname" . }}-scheduler
+  namespace: {{ .Release.Namespace | quote }}
+  labels: {{- include "common.labels.standard" ( dict "customLabels" .Values.commonLabels "context" $ ) | nindent 4 }}
+    {{- if .Values.commonAnnotations }}
+  annotations: {{- include "common.tplvalues.render" ( dict "value" .Values.commonAnnotations "context" $ ) | nindent 4 }}
+    {{- end }}
+spec:
+  schedule: {{ .Values.cronJobs.scheduler.schedule | quote }}
+  concurrencyPolicy: {{ .Values.cronJobs.scheduler.concurrencyPolicy }}
+  failedJobsHistoryLimit: {{ .Values.cronJobs.scheduler.failedJobsHistoryLimit }}
+  successfulJobsHistoryLimit: {{ .Values.cronJobs.scheduler.successfulJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- if .Values.cronJobs.scheduler.podLabels }}
+              {{- include "common.tplvalues.render" ( dict "value" .Values.cronJobs.scheduler.podLabels "context" $ ) | nindent 12 }}
+            {{- end }}
+        spec:
+          restartPolicy: OnFailure
+          initContainers:
+            - name: scheduler-init
+              image: "{{ include "wordpress.cronJobs.scheduler.initContainer.image" . }}"
+              imagePullPolicy: {{ .Values.cronJobs.scheduler.initContainer.image.pullPolicy | quote }}
+              command:
+                - 'sh'
+                - '-c'
+                - |
+                  URL="{{ include "wordpress.service.url" . }}"
+                  echo "Attempting to curl ${URL}/wp-login.php"
+                  while true; do
+                    STATUS_CODE=$(curl -o /dev/null -w '%{http_code}' -s ${URL}/wp-login.php)
+                    echo "Response: code $STATUS_CODE"
+                    if [ "$STATUS_CODE" = "200" ]; then
+                      break
+                    fi
+                    echo "Waiting for main service to return 200 OK response..."
+                    sleep 5
+                  done
+                  echo "Main service has started."
+          containers:
+            - name: scheduler
+              image: {{ template "wordpress.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+              securityContext:
+                {{- if .Values.cronJobs.scheduler.containerSecurityContext.enabled }}
+                  {{- omit .Values.cronJobs.scheduler.containerSecurityContext "enabled" | toYaml | nindent 16 }}
+                {{- end }}
+              command:
+                {{- if .Values.cronJobs.scheduler.command }}
+                  {{- include "common.tplvalues.render" (dict "value" .Values.cronJobs.scheduler.command "context" $) | nindent 16 }}
+                {{- else }}
+                - /bin/bash
+                - -c
+                {{- end }}
+              args:
+                {{- if .Values.cronJobs.scheduler.args }}
+                  {{- include "common.tplvalues.render" (dict "value" .Values.cronJobs.scheduler.args "context" $) | nindent 16 }}
+                {{- else }}
+                - . /opt/bitnami/scripts/php-env.sh &&
+                  . /opt/bitnami/scripts/wordpress-env.sh &&
+                  . /opt/bitnami/scripts/libbitnami.sh &&
+                  . /opt/bitnami/scripts/liblog.sh &&
+                  /opt/bitnami/scripts/php/setup.sh &&
+                  /opt/bitnami/scripts/mysql-client/setup.sh &&
+                  /opt/bitnami/scripts/wordpress/setup.sh &&
+                  /post-init.sh &&
+                  /opt/bitnami/php/bin/php /opt/bitnami/wordpress/wp-cron.php
+                {{- end }}
+              env:
+                - name: BITNAMI_DEBUG
+                  value: {{ ternary "true" "false" (or .Values.image.debug .Values.diagnosticMode.enabled) | quote }}
+                - name: ALLOW_EMPTY_PASSWORD
+                  value: {{ ternary "yes" "no" .Values.allowEmptyPassword | quote }}
+                - name: MARIADB_HOST
+                  value: {{ include "wordpress.databaseHost" . | quote }}
+                - name: MARIADB_PORT_NUMBER
+                  value: {{ include "wordpress.databasePort" . | quote }}
+                - name: WORDPRESS_DATABASE_NAME
+                  value: {{ include "wordpress.databaseName" . | quote }}
+                - name: WORDPRESS_DATABASE_USER
+                  value: {{ include "wordpress.databaseUser" . | quote }}
+                - name: WORDPRESS_DATABASE_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "wordpress.databaseSecretName" . }}
+                      key: mariadb-password
+                - name: WORDPRESS_USERNAME
+                  value: {{ .Values.wordpressUsername | quote }}
+                - name: WORDPRESS_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "wordpress.secretName" . }}
+                      key: wordpress-password
+                - name: WORDPRESS_EMAIL
+                  value: {{ .Values.wordpressEmail | quote }}
+                - name: WORDPRESS_FIRST_NAME
+                  value: {{ .Values.wordpressFirstName | quote }}
+                - name: WORDPRESS_LAST_NAME
+                  value: {{ .Values.wordpressLastName | quote }}
+                - name: WORDPRESS_HTACCESS_OVERRIDE_NONE
+                  value: {{ ternary "yes" "no" .Values.allowOverrideNone | quote }}
+                - name: WORDPRESS_ENABLE_HTACCESS_PERSISTENCE
+                  value: {{ ternary "yes" "no" .Values.htaccessPersistenceEnabled | quote }}
+                - name: WORDPRESS_BLOG_NAME
+                  value: {{ .Values.wordpressBlogName | quote }}
+                - name: WORDPRESS_SKIP_BOOTSTRAP
+                  value: {{ ternary "yes" "no" .Values.wordpressSkipInstall | quote }}
+                - name: WORDPRESS_TABLE_PREFIX
+                  value: {{ .Values.wordpressTablePrefix | quote }}
+                - name: WORDPRESS_SCHEME
+                  value: {{ .Values.wordpressScheme | quote }}
+                - name: WORDPRESS_EXTRA_WP_CONFIG_CONTENT
+                  value: {{ .Values.wordpressExtraConfigContent | quote }}
+                - name: WORDPRESS_PLUGINS
+                  value: {{ join "," .Values.wordpressPlugins | quote }}
+                - name: APACHE_HTTP_PORT_NUMBER
+                  value: {{ .Values.containerPorts.http | quote }}
+                - name: APACHE_HTTPS_PORT_NUMBER
+                  value: {{ .Values.containerPorts.https | quote }}
+                {{- if .Values.overrideDatabaseSettings }}
+                - name: WORDPRESS_OVERRIDE_DATABASE_SETTINGS
+                  value: "yes"
+                {{- end }}
+                {{- if .Values.multisite.enable }}
+                - name: WORDPRESS_ENABLE_MULTISITE
+                  value: "yes"
+                - name: WORDPRESS_MULTISITE_HOST
+                  value: {{ .Values.multisite.host | quote }}
+                - name: WORDPRESS_MULTISITE_EXTERNAL_HTTP_PORT_NUMBER
+                  value: {{ .Values.service.ports.http | quote }}
+                - name: WORDPRESS_MULTISITE_EXTERNAL_HTTPS_PORT_NUMBER
+                  value: {{ .Values.service.ports.https | quote }}
+                - name: WORDPRESS_MULTISITE_NETWORK_TYPE
+                  value: {{ .Values.multisite.networkType | quote }}
+                - name: WORDPRESS_MULTISITE_ENABLE_NIP_IO_REDIRECTION
+                  value: {{ ternary "yes" "no" .Values.multisite.enableNipIoRedirect | quote }}
+                {{- end }}
+                {{- if .Values.smtpHost }}
+                - name: SMTP_HOST
+                  value: {{ .Values.smtpHost | quote }}
+                {{- end }}
+                {{- if .Values.smtpPort }}
+                - name: SMTP_PORT
+                  value: {{ .Values.smtpPort | quote }}
+                {{- end }}
+                {{- if .Values.smtpUser }}
+                - name: SMTP_USER
+                  value: {{ .Values.smtpUser | quote }}
+                {{- end }}
+                {{- if or .Values.smtpPassword .Values.smtpExistingSecret }}
+                - name: SMTP_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ include "wordpress.smtpSecretName" . }}
+                      key: smtp-password
+                {{- end }}
+                {{- if .Values.smtpProtocol }}
+                - name: SMTP_PROTOCOL
+                  value: {{ .Values.smtpProtocol | quote }}
+                {{- end }}
+                - name: WP_CLI
+                  value: "true"
+                - name: HTTP_HOST
+                  value: "127.0.0.1"
+                {{- if .Values.extraEnvVars }}
+                  {{- include "common.tplvalues.render" (dict "value" .Values.extraEnvVars "context" $) | nindent 12 }}
+                {{- end }}
+              envFrom:
+                {{- if .Values.extraEnvVarsCM }}
+                - configMapRef:
+                    name: {{ include "common.tplvalues.render" (dict "value" .Values.extraEnvVarsCM "context" $) }}
+                {{- end }}
+                {{- if .Values.extraEnvVarsSecret }}
+                - secretRef:
+                    name: {{ include "common.tplvalues.render" (dict "value" .Values.extraEnvVarsSecret "context" $) }}
+                {{- end }}
+              volumeMounts:
+                - mountPath: /bitnami/wordpress
+                  name: wordpress-data
+                  subPath: wordpress
+                {{- if or .Values.wordpressConfiguration .Values.existingWordPressConfigurationSecret }}
+                - name: wordpress-config
+                  mountPath: /opt/bitnami/wordpress/wp-config.php
+                  subPath: wp-config.php
+                {{- end }}
+                {{- if or .Values.apacheConfiguration .Values.existingApacheConfigurationConfigMap }}
+                - name: apache-config
+                  mountPath: /opt/bitnami/apache/conf/httpd.conf
+                  subPath: httpd.conf
+                {{- end }}
+                {{- if and (not .Values.allowOverrideNone) .Values.customHTAccessCM }}
+                - mountPath: /opt/bitnami/apache/conf/vhosts/htaccess
+                  name: custom-htaccess
+                {{- end }}
+                {{- if or .Values.customPostInitScripts .Values.wordpressConfigureCache }}
+                - mountPath: /docker-entrypoint-init.d
+                  name: custom-postinit
+                {{- end }}
+                {{- if .Values.extraVolumeMounts }}
+                {{- include "common.tplvalues.render" (dict "value" .Values.extraVolumeMounts "context" $) | nindent 12 }}
+                {{- end }}
+          volumes:
+            {{- if or .Values.wordpressConfiguration .Values.existingWordPressConfigurationSecret }}
+            - name: wordpress-config
+              secret:
+                secretName: {{ include "wordpress.configSecretName" . }}
+                defaultMode: 0644
+            {{- end }}
+            {{- if or .Values.apacheConfiguration .Values.existingApacheConfigurationConfigMap }}
+            - name: apache-config
+              configMap:
+                name: {{ include "wordpress.apache.configmapName" . }}
+                defaultMode: 0644
+            {{- end }}
+            {{- if and (not .Values.allowOverrideNone) .Values.customHTAccessCM }}
+            - name: custom-htaccess
+              configMap:
+                name: {{ include "wordpress.customHTAccessCM" . }}
+                items:
+                  - key: wordpress-htaccess.conf
+                    path: wordpress-htaccess.conf
+            {{- end }}
+            {{- if or .Values.customPostInitScripts .Values.wordpressConfigureCache }}
+            - name: custom-postinit
+              configMap:
+                name: {{ printf "%s-postinit" (include "common.names.fullname" .) }}
+                defaultMode: 0755
+            {{- end }}
+            - name: wordpress-data
+              {{- if .Values.persistence.enabled }}
+              persistentVolumeClaim:
+                claimName: {{ .Values.persistence.existingClaim | default (include "common.names.fullname" .) }}
+              {{- else }}
+              emptyDir: {}
+              {{- end }}
+            {{- if .Values.extraVolumes }}
+            {{- include "common.tplvalues.render" (dict "value" .Values.extraVolumes "context" $) | nindent 8 }}
+            {{- end }}
+{{- end }}
